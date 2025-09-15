@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	gourl "net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +81,7 @@ type webArgs struct {
 	Total       int64
 	SampleTypes []string
 	Legend      []string
+	DocURL      string
 	Standalone  bool // True for command-line generation of HTML
 	Help        map[string]string
 	Nodes       []string
@@ -106,9 +109,7 @@ func serveWebInterface(hostport string, p *profile.Profile, o *plugin.Options, d
 	for n, c := range pprofCommands {
 		ui.help[n] = c.description
 	}
-	for n, help := range configHelp {
-		ui.help[n] = help
-	}
+	maps.Copy(ui.help, configHelp)
 	ui.help["details"] = "Show information about the profile and this view"
 	ui.help["graph"] = "Display profile as a directed graph"
 	ui.help["flamegraph"] = "Display profile as a flame graph"
@@ -226,12 +227,7 @@ func redirectWithQuery(path string, code int) http.HandlerFunc {
 }
 
 func isLocalhost(host string) bool {
-	for _, v := range []string{"localhost", "127.0.0.1", "[::1]", "::1"} {
-		if host == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains([]string{"localhost", "127.0.0.1", "[::1]", "::1"}, host)
 }
 
 func openBrowser(url string, o *plugin.Options) {
@@ -290,6 +286,7 @@ func renderHTML(dst io.Writer, tmpl string, rpt *report.Report, errList, legend 
 	data.Title = file + " " + profile
 	data.Errors = errList
 	data.Total = rpt.Total()
+	data.DocURL = rpt.DocURL()
 	data.Legend = legend
 	return getHTMLTemplates().ExecuteTemplate(dst, tmpl, data)
 }

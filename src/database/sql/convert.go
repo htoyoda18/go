@@ -290,7 +290,7 @@ func convertAssignRows(dest, src any, rows *Rows) error {
 			if d == nil {
 				return errNilPtr
 			}
-			*d = []byte(s.Format(time.RFC3339Nano))
+			*d = s.AppendFormat(make([]byte, 0, len(time.RFC3339Nano)), time.RFC3339Nano)
 			return nil
 		case *RawBytes:
 			if d == nil {
@@ -335,7 +335,6 @@ func convertAssignRows(dest, src any, rows *Rows) error {
 			if rows == nil {
 				return errors.New("invalid context to convert cursor rows, missing parent *Rows")
 			}
-			rows.closemu.Lock()
 			*d = Rows{
 				dc:          rows.dc,
 				releaseConn: func(error) {},
@@ -351,7 +350,6 @@ func convertAssignRows(dest, src any, rows *Rows) error {
 					parentCancel()
 				}
 			}
-			rows.closemu.Unlock()
 			return nil
 		}
 	}

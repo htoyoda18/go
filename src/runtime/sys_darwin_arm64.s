@@ -475,6 +475,12 @@ TEXT runtime·osinit_hack_trampoline(SB),NOSPLIT,$0
 	BL	libc_xpc_date_create_from_current(SB)
 	RET
 
+TEXT runtime·arc4random_buf_trampoline(SB),NOSPLIT,$0
+	MOVW	8(R0), R1	// arg 2 nbytes
+	MOVD	0(R0), R0	// arg 1 buf
+	BL	libc_arc4random_buf(SB)
+	RET
+
 // syscall calls a function in libc on behalf of the syscall package.
 // syscall takes a pointer to a struct like:
 // struct {
@@ -718,12 +724,8 @@ TEXT runtime·syscall9(SB),NOSPLIT,$0
 	MOVD	56(R0), R6	// a7
 	MOVD	64(R0), R7	// a8
 	MOVD	72(R0), R8	// a9
+	MOVD	R8, 0(RSP)	// the 9th arg and onwards must be passed on the stack
 	MOVD	8(R0), R0	// a1
-
-	// If fn is declared as vararg, we have to pass the vararg arguments on the stack.
-	// See syscall above. The only function this applies to is openat, for which the 4th
-	// arg must be on the stack.
-	MOVD	R3, (RSP)
 
 	BL	(R12)
 

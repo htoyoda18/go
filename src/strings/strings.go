@@ -10,6 +10,7 @@ package strings
 import (
 	"internal/bytealg"
 	"internal/stringslite"
+	"math/bits"
 	"unicode"
 	"unicode/utf8"
 )
@@ -124,6 +125,7 @@ func IndexByte(s string, c byte) int {
 // If r is [utf8.RuneError], it returns the first instance of any
 // invalid UTF-8 byte sequence.
 func IndexRune(s string, r rune) int {
+	const haveFastIndex = bytealg.MaxBruteForce > 0
 	switch {
 	case 0 <= r && r < utf8.RuneSelf:
 		return IndexByte(s, byte(r))
@@ -137,7 +139,60 @@ func IndexRune(s string, r rune) int {
 	case !utf8.ValidRune(r):
 		return -1
 	default:
-		return Index(s, string(r))
+		// Search for rune r using the last byte of its UTF-8 encoded form.
+		// The distribution of the last byte is more uniform compared to the
+		// first byte which has a 78% chance of being [240, 243, 244].
+		rs := string(r)
+		last := len(rs) - 1
+		i := last
+		fails := 0
+		for i < len(s) {
+			if s[i] != rs[last] {
+				o := IndexByte(s[i+1:], rs[last])
+				if o < 0 {
+					return -1
+				}
+				i += o + 1
+			}
+			// Step backwards comparing bytes.
+			for j := 1; j < len(rs); j++ {
+				if s[i-j] != rs[last-j] {
+					goto next
+				}
+			}
+			return i - last
+		next:
+			fails++
+			i++
+			if (haveFastIndex && fails > bytealg.Cutover(i)) && i < len(s) ||
+				(!haveFastIndex && fails >= 4+i>>4 && i < len(s)) {
+				goto fallback
+			}
+		}
+		return -1
+
+	fallback:
+		// see comment in ../bytes/bytes.go
+		if haveFastIndex {
+			if j := bytealg.IndexString(s[i-last:], string(r)); j >= 0 {
+				return i + j - last
+			}
+		} else {
+			c0 := rs[last]
+			c1 := rs[last-1]
+		loop:
+			for ; i < len(s); i++ {
+				if s[i] == c0 && s[i-1] == c1 {
+					for k := 2; k < len(rs); k++ {
+						if s[i-k] != rs[last-k] {
+							continue loop
+						}
+					}
+					return i - last
+				}
+			}
+		}
+		return -1
 	}
 }
 
@@ -267,10 +322,9 @@ func genSplit(s, sep string, sepSave, n int) []string {
 // the substrings between those separators.
 //
 // The count determines the number of substrings to return:
-//
-//	n > 0: at most n substrings; the last substring will be the unsplit remainder.
-//	n == 0: the result is nil (zero substrings)
-//	n < 0: all substrings
+//   - n > 0: at most n substrings; the last substring will be the unsplit remainder;
+//   - n == 0: the result is nil (zero substrings);
+//   - n < 0: all substrings.
 //
 // Edge cases for s and sep (for example, empty strings) are handled
 // as described in the documentation for [Split].
@@ -282,13 +336,12 @@ func SplitN(s, sep string, n int) []string { return genSplit(s, sep, 0, n) }
 // returns a slice of those substrings.
 //
 // The count determines the number of substrings to return:
-//
-//	n > 0: at most n substrings; the last substring will be the unsplit remainder.
-//	n == 0: the result is nil (zero substrings)
-//	n < 0: all substrings
+//   - n > 0: at most n substrings; the last substring will be the unsplit remainder;
+//   - n == 0: the result is nil (zero substrings);
+//   - n < 0: all substrings.
 //
 // Edge cases for s and sep (for example, empty strings) are handled
-// as described in the documentation for SplitAfter.
+// as described in the documentation for [SplitAfter].
 func SplitAfterN(s, sep string, n int) []string {
 	return genSplit(s, sep, len(sep), n)
 }
@@ -325,7 +378,9 @@ var asciiSpace = [256]uint8{'\t': 1, '\n': 1, '\v': 1, '\f': 1, '\r': 1, ' ': 1}
 
 // Fields splits the string s around each instance of one or more consecutive white space
 // characters, as defined by [unicode.IsSpace], returning a slice of substrings of s or an
-// empty slice if s contains only white space.
+// empty slice if s contains only white space. Every element of the returned slice is
+// non-empty. Unlike [Split], leading and trailing runs of white space characters
+// are discarded.
 func Fields(s string) []string {
 	// First count the fields.
 	// This is an exact count if s is ASCII, otherwise it is an approximation.
@@ -377,7 +432,9 @@ func Fields(s string) []string {
 
 // FieldsFunc splits the string s at each run of Unicode code points c satisfying f(c)
 // and returns an array of slices of s. If all code points in s satisfy f(c) or the
-// string is empty, an empty slice is returned.
+// string is empty, an empty slice is returned. Every element of the returned slice is
+// non-empty. Unlike [SplitFunc], leading and trailing runs of code points satisfying f(c)
+// are discarded.
 //
 // FieldsFunc makes no guarantees about the order in which it calls f(c)
 // and assumes that f always returns the same value for a given c.
@@ -570,10 +627,11 @@ func Repeat(s string, count int) string {
 	if count < 0 {
 		panic("strings: negative Repeat count")
 	}
-	if len(s) > maxInt/count {
+	hi, lo := bits.Mul(uint(len(s)), uint(count))
+	if hi > 0 || lo > uint(maxInt) {
 		panic("strings: Repeat output length overflow")
 	}
-	n := len(s) * count
+	n := int(lo) // lo = len(s) * count
 
 	if len(s) == 0 {
 		return ""
@@ -619,13 +677,7 @@ func Repeat(s string, count int) string {
 	b.Grow(n)
 	b.WriteString(s)
 	for b.Len() < n {
-		chunk := n - b.Len()
-		if chunk > b.Len() {
-			chunk = b.Len()
-		}
-		if chunk > chunkMax {
-			chunk = chunkMax
-		}
+		chunk := min(n-b.Len(), b.Len(), chunkMax)
 		b.WriteString(b.String()[:chunk])
 	}
 	return b.String()
@@ -844,7 +896,7 @@ func TrimLeftFunc(s string, f func(rune) bool) string {
 // Unicode code points c satisfying f(c) removed.
 func TrimRightFunc(s string, f func(rune) bool) string {
 	i := lastIndexFunc(s, f, false)
-	if i >= 0 && s[i] >= utf8.RuneSelf {
+	if i >= 0 {
 		_, wid := utf8.DecodeRuneInString(s[i:])
 		i += wid
 	} else {
@@ -976,10 +1028,7 @@ func trimLeftASCII(s string, as *asciiSet) string {
 
 func trimLeftUnicode(s, cutset string) string {
 	for len(s) > 0 {
-		r, n := rune(s[0]), 1
-		if r >= utf8.RuneSelf {
-			r, n = utf8.DecodeRuneInString(s)
-		}
+		r, n := utf8.DecodeRuneInString(s)
 		if !ContainsRune(cutset, r) {
 			break
 		}
@@ -1039,37 +1088,32 @@ func trimRightUnicode(s, cutset string) string {
 // TrimSpace returns a slice of the string s, with all leading
 // and trailing white space removed, as defined by Unicode.
 func TrimSpace(s string) string {
-	// Fast path for ASCII: look for the first ASCII non-space byte
-	start := 0
-	for ; start < len(s); start++ {
-		c := s[start]
+	// Fast path for ASCII: look for the first ASCII non-space byte.
+	for lo, c := range []byte(s) {
 		if c >= utf8.RuneSelf {
 			// If we run into a non-ASCII byte, fall back to the
-			// slower unicode-aware method on the remaining bytes
-			return TrimFunc(s[start:], unicode.IsSpace)
+			// slower unicode-aware method on the remaining bytes.
+			return TrimFunc(s[lo:], unicode.IsSpace)
 		}
-		if asciiSpace[c] == 0 {
-			break
+		if asciiSpace[c] != 0 {
+			continue
+		}
+		s = s[lo:]
+		// Now look for the first ASCII non-space byte from the end.
+		for hi := len(s) - 1; hi >= 0; hi-- {
+			c := s[hi]
+			if c >= utf8.RuneSelf {
+				return TrimRightFunc(s[:hi+1], unicode.IsSpace)
+			}
+			if asciiSpace[c] == 0 {
+				// At this point, s[:hi+1] starts and ends with ASCII
+				// non-space bytes, so we're done. Non-ASCII cases have
+				// already been handled above.
+				return s[:hi+1]
+			}
 		}
 	}
-
-	// Now look for the first ASCII non-space byte from the end
-	stop := len(s)
-	for ; stop > start; stop-- {
-		c := s[stop-1]
-		if c >= utf8.RuneSelf {
-			// start has been already trimmed above, should trim end only
-			return TrimRightFunc(s[start:stop], unicode.IsSpace)
-		}
-		if asciiSpace[c] == 0 {
-			break
-		}
-	}
-
-	// At this point s[start:stop] starts and ends with an ASCII
-	// non-space bytes, so we're done. Non-ASCII cases have already
-	// been handled above.
-	return s[start:stop]
+	return ""
 }
 
 // TrimPrefix returns s without the provided leading prefix string.
@@ -1106,19 +1150,22 @@ func Replace(s, old, new string, n int) string {
 	var b Builder
 	b.Grow(len(s) + n*(len(new)-len(old)))
 	start := 0
-	for i := 0; i < n; i++ {
-		j := start
-		if len(old) == 0 {
-			if i > 0 {
-				_, wid := utf8.DecodeRuneInString(s[start:])
-				j += wid
-			}
-		} else {
-			j += Index(s[start:], old)
+	if len(old) > 0 {
+		for range n {
+			j := start + Index(s[start:], old)
+			b.WriteString(s[start:j])
+			b.WriteString(new)
+			start = j + len(old)
 		}
-		b.WriteString(s[start:j])
+	} else { // len(old) == 0
 		b.WriteString(new)
-		start = j + len(old)
+		for range n - 1 {
+			_, wid := utf8.DecodeRuneInString(s[start:])
+			j := start + wid
+			b.WriteString(s[start:j])
+			b.WriteString(new)
+			start = j
+		}
 	}
 	b.WriteString(s[start:])
 	return b.String()
@@ -1139,7 +1186,7 @@ func ReplaceAll(s, old, new string) string {
 func EqualFold(s, t string) bool {
 	// ASCII fast path
 	i := 0
-	for ; i < len(s) && i < len(t); i++ {
+	for n := min(len(s), len(t)); i < n; i++ {
 		sr := s[i]
 		tr := t[i]
 		if sr|tr >= utf8.RuneSelf {
@@ -1174,13 +1221,8 @@ hasUnicode:
 		}
 
 		// Extract first rune from second string.
-		var tr rune
-		if t[0] < utf8.RuneSelf {
-			tr, t = rune(t[0]), t[1:]
-		} else {
-			r, size := utf8.DecodeRuneInString(t)
-			tr, t = r, t[size:]
-		}
+		tr, size := utf8.DecodeRuneInString(t)
+		t = t[size:]
 
 		// If they match, keep going; if not, return false.
 

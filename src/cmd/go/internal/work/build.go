@@ -23,6 +23,7 @@ import (
 	"cmd/go/internal/modload"
 	"cmd/go/internal/search"
 	"cmd/go/internal/trace"
+	"cmd/internal/pathcache"
 )
 
 var CmdBuild = &base.Command{
@@ -76,8 +77,9 @@ and test commands:
 		The default is GOMAXPROCS, normally the number of CPUs available.
 	-race
 		enable data race detection.
-		Supported only on linux/amd64, freebsd/amd64, darwin/amd64, darwin/arm64, windows/amd64,
-		linux/ppc64le and linux/arm64 (only for 48-bit VMA).
+		Supported only on darwin/amd64, darwin/arm64, freebsd/amd64, linux/amd64,
+		linux/arm64 (only for 48-bit VMA), linux/ppc64le, linux/riscv64 and
+		windows/amd64.
 	-msan
 		enable interoperation with memory sanitizer.
 		Supported only on linux/amd64, linux/arm64, linux/loong64, freebsd/amd64
@@ -103,10 +105,11 @@ and test commands:
 		Sets -cover.
 	-coverpkg pattern1,pattern2,pattern3
 		For a build that targets package 'main' (e.g. building a Go
-		executable), apply coverage analysis to each package matching
-		the patterns. The default is to apply coverage analysis to
-		packages in the main Go module. See 'go help packages' for a
-		description of package patterns.  Sets -cover.
+		executable), apply coverage analysis to each package whose
+		import path matches the patterns. The default is to apply
+		coverage analysis to packages in the main Go module. See
+		'go help packages' for a description of package patterns.
+		Sets -cover.
 	-v
 		print the names of packages as they are compiled.
 	-work
@@ -139,6 +142,9 @@ and test commands:
 		or, if set explicitly, has _race appended to it. Likewise for the -msan
 		and -asan flags. Using a -buildmode option that requires non-default compile
 		flags has a similar effect.
+	-json
+		Emit build output in JSON suitable for automated processing.
+		See 'go help buildjson' for the encoding details.
 	-ldflags '[pattern=]arg list'
 		arguments to pass on each go tool link invocation.
 	-linkshared
@@ -162,15 +168,16 @@ and test commands:
 		-modfile flag by trimming the ".mod" extension and appending ".sum".
 	-overlay file
 		read a JSON config file that provides an overlay for build operations.
-		The file is a JSON struct with a single field, named 'Replace', that
+		The file is a JSON object with a single field, named 'Replace', that
 		maps each disk file path (a string) to its backing file path, so that
 		a build will run as if the disk file path exists with the contents
 		given by the backing file paths, or as if the disk file path does not
 		exist if its backing file path is empty. Support for the -overlay flag
 		has some limitations: importantly, cgo files included from outside the
 		include path must be in the same directory as the Go package they are
-		included from, and overlays will not appear when binaries and tests are
-		run through go run and go test respectively.
+		included from, overlays will not appear when binaries and tests are
+		run through go run and go test respectively, and files beneath
+		GOMODCACHE may not be replaced.
 	-pgo file
 		specify the file path of a profile for profile-guided optimization (PGO).
 		When the special name "auto" is specified, for each main package in the
@@ -242,10 +249,8 @@ func init() {
 
 	AddBuildFlags(CmdBuild, DefaultBuildFlags)
 	AddBuildFlags(CmdInstall, DefaultBuildFlags)
-	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
-		AddCoverFlags(CmdBuild, nil)
-		AddCoverFlags(CmdInstall, nil)
-	}
+	AddCoverFlags(CmdBuild, nil)
+	AddCoverFlags(CmdInstall, nil)
 }
 
 // Note that flags consulted by other parts of the code
@@ -298,6 +303,8 @@ const (
 	OmitModFlag       BuildFlagMask = 1 << iota
 	OmitModCommonFlags
 	OmitVFlag
+	OmitBuildOnlyFlags // Omit flags that only affect building packages
+	OmitJSONFlag
 )
 
 // AddBuildFlags adds the flags common to the build, clean, get,
@@ -311,9 +318,11 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 		cmd.Flag.BoolVar(&cfg.BuildV, "v", false, "")
 	}
 
+	cmd.Flag.BoolVar(&cfg.BuildASan, "asan", false, "")
 	cmd.Flag.Var(&load.BuildAsmflags, "asmflags", "")
 	cmd.Flag.Var(buildCompiler{}, "compiler", "")
 	cmd.Flag.StringVar(&cfg.BuildBuildmode, "buildmode", "default", "")
+	cmd.Flag.Var((*buildvcsFlag)(&cfg.BuildBuildvcs), "buildvcs", "")
 	cmd.Flag.Var(&load.BuildGcflags, "gcflags", "")
 	cmd.Flag.Var(&load.BuildGccgoflags, "gccgoflags", "")
 	if mask&OmitModFlag == 0 {
@@ -328,45 +337,37 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 		cmd.Flag.StringVar(&fsys.OverlayFile, "overlay", "", "")
 	}
 	cmd.Flag.StringVar(&cfg.BuildContext.InstallSuffix, "installsuffix", "", "")
+	if mask&(OmitBuildOnlyFlags|OmitJSONFlag) == 0 {
+		// TODO(#62250): OmitBuildOnlyFlags should apply to many more flags
+		// here, but we let a bunch of flags slip in before we realized that
+		// many of them don't make sense for most subcommands. We might even
+		// want to separate "AddBuildFlags" and "AddSelectionFlags".
+		cmd.Flag.BoolVar(&cfg.BuildJSON, "json", false, "")
+	}
 	cmd.Flag.Var(&load.BuildLdflags, "ldflags", "")
 	cmd.Flag.BoolVar(&cfg.BuildLinkshared, "linkshared", false, "")
+	cmd.Flag.BoolVar(&cfg.BuildMSan, "msan", false, "")
 	cmd.Flag.StringVar(&cfg.BuildPGO, "pgo", "auto", "")
 	cmd.Flag.StringVar(&cfg.BuildPkgdir, "pkgdir", "", "")
 	cmd.Flag.BoolVar(&cfg.BuildRace, "race", false, "")
-	cmd.Flag.BoolVar(&cfg.BuildMSan, "msan", false, "")
-	cmd.Flag.BoolVar(&cfg.BuildASan, "asan", false, "")
 	cmd.Flag.Var((*tagsFlag)(&cfg.BuildContext.BuildTags), "tags", "")
 	cmd.Flag.Var((*base.StringsFlag)(&cfg.BuildToolexec), "toolexec", "")
 	cmd.Flag.BoolVar(&cfg.BuildTrimpath, "trimpath", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildWork, "work", false, "")
-	cmd.Flag.Var((*buildvcsFlag)(&cfg.BuildBuildvcs), "buildvcs", "")
 
 	// Undocumented, unstable debugging flags.
 	cmd.Flag.StringVar(&cfg.DebugActiongraph, "debug-actiongraph", "", "")
-	cmd.Flag.StringVar(&cfg.DebugTrace, "debug-trace", "", "")
 	cmd.Flag.StringVar(&cfg.DebugRuntimeTrace, "debug-runtime-trace", "", "")
+	cmd.Flag.StringVar(&cfg.DebugTrace, "debug-trace", "", "")
 }
 
-// AddCoverFlags adds coverage-related flags to "cmd". If the
-// CoverageRedesign experiment is enabled, we add -cover{mode,pkg} to
-// the build command and only -coverprofile to the test command. If
-// the CoverageRedesign experiment is disabled, -cover* flags are
-// added only to the test command.
+// AddCoverFlags adds coverage-related flags to "cmd".
+// We add -cover{mode,pkg} to the build command and only
+// -coverprofile to the test command.
 func AddCoverFlags(cmd *base.Command, coverProfileFlag *string) {
-	addCover := false
-	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
-		// New coverage enabled: both build and test commands get
-		// coverage flags.
-		addCover = true
-	} else {
-		// New coverage disabled: only test command gets cover flags.
-		addCover = coverProfileFlag != nil
-	}
-	if addCover {
-		cmd.Flag.BoolVar(&cfg.BuildCover, "cover", false, "")
-		cmd.Flag.Var(coverFlag{(*coverModeFlag)(&cfg.BuildCoverMode)}, "covermode", "")
-		cmd.Flag.Var(coverFlag{commaListFlag{&cfg.BuildCoverPkg}}, "coverpkg", "")
-	}
+	cmd.Flag.BoolVar(&cfg.BuildCover, "cover", false, "")
+	cmd.Flag.Var(coverFlag{(*coverModeFlag)(&cfg.BuildCoverMode)}, "covermode", "")
+	cmd.Flag.Var(coverFlag{commaListFlag{&cfg.BuildCoverPkg}}, "coverpkg", "")
 	if coverProfileFlag != nil {
 		cmd.Flag.Var(coverFlag{V: stringFlag{coverProfileFlag}}, "coverprofile", "")
 	}
@@ -501,7 +502,7 @@ func runBuild(ctx context.Context, cmd *base.Command, args []string) {
 		cfg.BuildO = ""
 	}
 
-	if cfg.Experiment.CoverageRedesign && cfg.BuildCover {
+	if cfg.BuildCover {
 		load.PrepareForCoverageBuild(pkgs)
 	}
 
@@ -568,6 +569,8 @@ Executables are installed in the directory named by the GOBIN environment
 variable, which defaults to $GOPATH/bin or $HOME/go/bin if the GOPATH
 environment variable is not set. Executables in $GOROOT
 are installed in $GOROOT/bin or $GOTOOLDIR instead of $GOBIN.
+Cross compiled binaries are installed in $GOOS_$GOARCH subdirectories
+of the above.
 
 If the arguments have version suffixes (like @latest or @v1.0.0), "go install"
 builds packages in module-aware mode, ignoring the go.mod file in the current
@@ -718,7 +721,7 @@ func runInstall(ctx context.Context, cmd *base.Command, args []string) {
 	}
 	load.CheckPackageErrors(pkgs)
 
-	if cfg.Experiment.CoverageRedesign && cfg.BuildCover {
+	if cfg.BuildCover {
 		load.PrepareForCoverageBuild(pkgs)
 	}
 
@@ -901,7 +904,7 @@ func FindExecCmd() []string {
 	if cfg.Goos == runtime.GOOS && cfg.Goarch == runtime.GOARCH {
 		return ExecCmd
 	}
-	path, err := cfg.LookPath(fmt.Sprintf("go_%s_%s_exec", cfg.Goos, cfg.Goarch))
+	path, err := pathcache.LookPath(fmt.Sprintf("go_%s_%s_exec", cfg.Goos, cfg.Goarch))
 	if err == nil {
 		ExecCmd = []string{path}
 	}

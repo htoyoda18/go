@@ -110,11 +110,12 @@ func trim(s []byte) []byte {
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
 	}
-	n := len(s)
-	for n > i && (s[n-1] == ' ' || s[n-1] == '\t') {
+	s = s[i:]
+	n := len(s) - 1
+	for n >= 0 && (s[n] == ' ' || s[n] == '\t') {
 		n--
 	}
-	return s[i:n]
+	return s[:n+1]
 }
 
 // ReadContinuedLineBytes is like [Reader.ReadContinuedLine] but
@@ -642,8 +643,8 @@ func (r *Reader) upcomingHeaderKeys() (n int) {
 // the rest are converted to lowercase. For example, the
 // canonical key for "accept-encoding" is "Accept-Encoding".
 // MIME header keys are assumed to be ASCII only.
-// If s contains a space or invalid header field bytes, it is
-// returned without modifications.
+// If s contains a space or invalid header field bytes as
+// defined by RFC 9112, it is returned without modifications.
 func CanonicalMIMEHeaderKey(s string) string {
 	// Quick check for canonical encoding.
 	upper := true

@@ -151,9 +151,13 @@ func TestTickerResetLtZeroDuration(t *testing.T) {
 }
 
 func TestLongAdjustTimers(t *testing.T) {
-	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" || runtime.GOOS == "plan9" {
 		t.Skipf("skipping on %s - too slow", runtime.GOOS)
 	}
+	if testing.Short() && runtime.NumCPU() < 2 {
+		t.Skipf("skipping in short mode, insufficient CPUs")
+	}
+
 	t.Parallel()
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -462,7 +466,7 @@ func testTimerChan(t *testing.T, tim timer, C <-chan Time, synctimerchan bool) {
 		tim.Reset(1)
 		Sleep(sched)
 		if l, c := len(C), cap(C); l != 0 || c != 0 {
-			//t.Fatalf("len(C), cap(C) = %d, %d, want 0, 0", l, c)
+			// t.Fatalf("len(C), cap(C) = %d, %d, want 0, 0", l, c)
 		}
 		assertTick()
 	} else {
