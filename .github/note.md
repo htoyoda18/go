@@ -1,1 +1,8 @@
-# github 用のファイル
+- ISSUE_TEMPLATE
+  - イシューのテンプレ
+- CODE_OF_CONDUCT.md
+  - 行動規範
+- PULL_REQUEST_TEMPLATE
+  - プロジェクトの PR/コミットメッセージ規約
+- SUPPORT.md
+  - Go プロジェクトでの質問・議論の場
