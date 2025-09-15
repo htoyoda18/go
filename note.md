@@ -1,5 +1,33 @@
-# Go のプロジェクト
-
-## コントリビュートガイド
-
-- https://go.dev/doc/contribute
+- .github
+  - github の設定ファイル
+- api
+  - Go の公開 API 一覧を管理するデータディレクトリ
+- doc
+  - リリースノートや公式ドキュメントを生成・管理するためのソースディレクトリ
+- lib
+  - Go 言語の本体ビルドや動作に必要な「追加データ・実行補助ファイル」
+- misc
+  - miscellaneous(雑多)
+  - 周辺ツール・サンプル・プラットフォーム補助スクリプトなど
+- src
+  - 標準パッケージ・ランタイム・ビルドツール群
+- test
+  - 言語処理系全体を検証する専用ハーネス用の回帰テスト集
+- .gitattributes
+  - Git の属性設定
+- .gitignore
+  - git の管理対象から除外するファイル/ディレクトリ
+- CONTRIBUTING.md
+  - Go にコントリビュートする際のガイドライン
+- LICENSE
+  - Go の利用ライセンス
+- PATENTS
+  - 特許に関する利用条件
+- README.md
+  - リポジトリ全体の概要
+- SECURITY.md
+  - セキュリティ脆弱性を発見したときの報告手順
+- codereview.cfg
+  - Gerrit の設定ファイル
+- go.env
+  - Go ツールチェーンのデフォルト環境変数設定ファイル
