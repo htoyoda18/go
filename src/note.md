@@ -1,1 +1,88 @@
-# Go 言語本体の実装
+標準パッケージ・ランタイム・ビルドツール群
+
+- archive
+  - 圧縮・アーカイブファイル形式を扱う
+- arena
+  - Go 1.20 で導入された 実験的なアリーナ型メモリアロケータ
+- bufio
+  - バッファ付き I/O を提供する
+- builtin
+  - Go にあらかじめ組み込まれている 組み込み定義（型や関数） をまとめたパッケージ
+- bytes
+  - []byte（バイトスライス）操作用のユーティリティ
+- cmd
+  - Go ツールチェーンそのものを構成するコマンド群
+- cmp
+  - 型安全な比較関数を提供する小さなパッケージ
+- compress
+  - 圧縮アルゴリズムの実装を集めたパッケージ群
+- container
+  - クラシックなデータ構造をパッケージとして提供
+- context
+  - 
+- crypto
+- database
+- debug
+- embed
+- encoding
+- errors
+- expvar
+- flag
+- fmt
+- go
+- hash
+- html
+- image
+- index
+- internal
+- io
+- iter
+- log
+- maps
+- math
+- mime
+- net
+- os
+- path
+- plugin
+- reflect
+- regexp
+- runtime
+- slices
+- sort
+- strconv
+- strings
+- structs
+- sync
+- syscall
+- testdata
+- testing
+- text
+- time
+- unicode
+- unique
+- unsafe
+- vendor
+- weak
+- Make.dist
+- README.vendor
+- all.bash
+- all.bat
+- all.rc
+- bootstrap.bash
+- buildall.bash
+- clean.bash
+- clean.bat
+- clean.rc
+- cmp.bash
+- go.mod
+- go.sum
+- make.bash
+- make.bat
+- make.rc
+- note.md
+- race.bash
+- race.bat
+- run.bash
+- run.bat
+- run.rc
