@@ -52,45 +52,82 @@
 - index
   - インデックス作成や検索用のアルゴリズム
 - internal
-  - Goの内部利用専用パッケージ群
+  - Go の内部利用専用パッケージ群
 - io
   - 入出力の基本インターフェースを定義
 - iter
-  - Goにおけるイテレータを表現する
+  - Go におけるイテレータを表現する
 - log
   - シンプルなロギング機能を提供
 - maps
   - ジェネリクス対応の map ユーティリティ関数
 - math
+  - 数学関数や定数を提供
 - mime
+  - MIME 型を扱うパッケージ
+    - Multipurpose Internet Mail Extensions
+      - メールや HTTP などのテキストベースのプロトコルで、非テキストデータを正しく扱うための仕組み
 - net
+  - ネットワーク関連の低レベル API を提供する
 - os
+  - OS とのやり取りを行う
 - path
+  - パス文字列を処理する
 - plugin
+  - 動的にロードできる共有オブジェクトファイルを扱うパッケージ
 - reflect
+  - リフレクション(型や値を動的に扱う仕組み)を提供する
 - regexp
+  - 正規表現を扱うパッケージ
 - runtime
+  - Go のランタイム(実行時環境)を操作するパッケージ
+  - Goroutine 管理、GC 情報、OS/CPU 情報などの取得
 - slices
+  - ジェネリクス対応のスライス操作ユーティリティ
 - sort
+  - スライスやカスタムデータを並べ替える
 - strconv
+  - 文字列と数値/ブール値の相互変換を行う
 - strings
+  - 文字列操作のための基本ユーティリティ
 - structs
+  - 構造体操作周りのパッケージ？？
 - sync
+  - Go の並行処理を安全にするため
 - syscall
+  - OSのシステムコールや低レベルAPIを直接呼び出す
 - testdata
+  - テスト専用のディレクトリ
 - testing
+  - Go の テストフレームワーク
 - text
+  - 文字列処理関連のパッケージ
 - time
+  - 日付・時刻の操作を行う
 - unicode
+  - Unicode 文字に関する処理を提供
 - unique
+  - り 同じ値を一意にまとめて共有する
 - unsafe
+  - 型安全性を無視した低レベル操作
 - vendor
+  - 依存パッケージをプロジェクト内にコピーして固定する
 - weak
+  - 弱参照を安全に扱う仕組み
+  - 弱参照
+    - 対象オブジェクトのGCを妨げない参照
 - Make.dist
+  - ソースツリーに含まれる Makefile
 - README.vendor
+  - 標準ライブラリ内の vendoring の仕組みを説明する文書
+  - vendoring
+    - 依存パッケージをプロジェクト内にコピーして保持する
 - all.bash
+  - Go を UNIX系システムでフルビルド & テストするスクリプト
 - all.bat
 - all.rc
+  - Plan 9 / rc シェル向けの all.bash 相当スクリプト
+  - Plan 9 from Bell Labs
 - bootstrap.bash
 - buildall.bash
 - clean.bash
