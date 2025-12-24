@@ -1,0 +1,34 @@
+Go の公開 API 一覧を管理するデータディレクトリ
+
+- next
+  - 次期リリースに含まれる可能性がある API を issue 番号ごとのファイルにまとめる
+- README
+- except.txt
+  - 互換性を壊さずに消える可能性がある API 機能を列挙
+- 各バージョンの新 API・変更点
+  - go1.1.txt
+  - go1.10.txt
+  - go1.11.txt
+  - go1.12.txt
+  - go1.13.txt
+  - go1.14.txt
+  - go1.15.txt
+  - go1.16.txt
+  - go1.17.txt
+  - go1.18.txt
+  - go1.19.txt
+  - go1.2.txt
+  - go1.20.txt
+  - go1.21.txt
+  - go1.22.txt
+  - go1.23.txt
+  - go1.24.txt
+  - go1.25.txt
+  - go1.3.txt
+  - go1.4.txt
+  - go1.5.txt
+  - go1.6.txt
+  - go1.7.txt
+  - go1.8.txt
+  - go1.9.txt
+  - go1.txt

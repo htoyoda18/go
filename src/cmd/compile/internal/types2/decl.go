@@ -8,8 +8,8 @@ import (
 	"cmd/compile/internal/syntax"
 	"fmt"
 	"go/constant"
-	"internal/buildcfg"
 	. "internal/types/errors"
+	"slices"
 )
 
 func (check *Checker) declare(scope *Scope, id *syntax.Name, obj Object, pos syntax.Pos) {
@@ -47,6 +47,17 @@ func pathString(path []Object) string {
 // objDecl type-checks the declaration of obj in its respective (file) environment.
 // For the meaning of def, see Checker.definedType, in typexpr.go.
 func (check *Checker) objDecl(obj Object, def *TypeName) {
+	if tracePos {
+		check.pushPos(obj.Pos())
+		defer func() {
+			// If we're panicking, keep stack of source positions.
+			if p := recover(); p != nil {
+				panic(p)
+			}
+			check.popPos()
+		}()
+	}
+
 	if check.conf.Trace && obj.Type() == nil {
 		if check.indent == 0 {
 			fmt.Println() // empty line between top-level objects for readability
@@ -169,9 +180,7 @@ func (check *Checker) objDecl(obj Object, def *TypeName) {
 	defer func(env environment) {
 		check.environment = env
 	}(check.environment)
-	check.environment = environment{
-		scope: d.file,
-	}
+	check.environment = environment{scope: d.file, version: d.version}
 
 	// Const and var declarations must not have initialization
 	// cycles. We track them by remembering the current declaration
@@ -307,45 +316,43 @@ func (check *Checker) cycleError(cycle []Object, start int) {
 		return packagePrefix(obj.Pkg(), check.qualifier) + obj.Name()
 	}
 
-	obj := cycle[start]
-	objName := name(obj)
 	// If obj is a type alias, mark it as valid (not broken) in order to avoid follow-on errors.
+	obj := cycle[start]
 	tname, _ := obj.(*TypeName)
-	if tname != nil && tname.IsAlias() {
-		// If we use Alias nodes, it is initialized with Typ[Invalid].
-		// TODO(gri) Adjust this code if we initialize with nil.
-		if !check.conf.EnableAlias {
-			check.validAlias(tname, Typ[Invalid])
+	if tname != nil {
+		if check.conf.EnableAlias {
+			if a, ok := tname.Type().(*Alias); ok {
+				a.fromRHS = Typ[Invalid]
+			}
+		} else {
+			if tname.IsAlias() {
+				check.validAlias(tname, Typ[Invalid])
+			}
 		}
 	}
 
 	// report a more concise error for self references
 	if len(cycle) == 1 {
 		if tname != nil {
-			check.errorf(obj, InvalidDeclCycle, "invalid recursive type: %s refers to itself", objName)
+			check.errorf(obj, InvalidDeclCycle, "invalid recursive type: %s refers to itself", name(obj))
 		} else {
-			check.errorf(obj, InvalidDeclCycle, "invalid cycle in declaration: %s refers to itself", objName)
+			check.errorf(obj, InvalidDeclCycle, "invalid cycle in declaration: %s refers to itself", name(obj))
 		}
 		return
 	}
 
 	err := check.newError(InvalidDeclCycle)
 	if tname != nil {
-		err.addf(obj, "invalid recursive type %s", objName)
+		err.addf(obj, "invalid recursive type %s", name(obj))
 	} else {
-		err.addf(obj, "invalid cycle in declaration of %s", objName)
+		err.addf(obj, "invalid cycle in declaration of %s", name(obj))
 	}
-	i := start
-	for range cycle {
-		err.addf(obj, "%s refers to", objName)
-		i++
-		if i >= len(cycle) {
-			i = 0
-		}
-		obj = cycle[i]
-		objName = name(obj)
+	// "cycle[i] refers to cycle[j]" for (i,j) = (s,s+1), (s+1,s+2), ..., (n-1,0), (0,1), ..., (s-1,s) for len(cycle) = n, s = start.
+	for i := range cycle {
+		next := cycle[(start+i+1)%len(cycle)]
+		err.addf(obj, "%s refers to %s", name(obj), name(next))
+		obj = next
 	}
-	err.addf(obj, "%s", objName)
 	err.report()
 }
 
@@ -442,14 +449,7 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init syntax.Expr) {
 
 	if debug {
 		// obj must be one of lhs
-		found := false
-		for _, lhs := range lhs {
-			if obj == lhs {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(lhs, obj) {
 			panic("inconsistent lhs")
 		}
 	}
@@ -510,23 +510,20 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *TypeN
 		}
 
 		if check.conf.EnableAlias {
-			// TODO(gri) Should be able to use nil instead of Typ[Invalid] to mark
-			//           the alias as incomplete. Currently this causes problems
-			//           with certain cycles. Investigate.
-			//
-			// NOTE(adonovan): to avoid the Invalid being prematurely observed
-			// by (e.g.) a var whose type is an unfinished cycle,
-			// Unalias does not memoize if Invalid. Perhaps we should use a
-			// special sentinel distinct from Invalid.
-			alias := check.newAlias(obj, Typ[Invalid])
+			alias := check.newAlias(obj, nil)
 			setDefType(def, alias)
+
+			// If we could not type the RHS, set it to invalid. This should
+			// only ever happen if we panic before setting.
+			defer func() {
+				if alias.fromRHS == nil {
+					alias.fromRHS = Typ[Invalid]
+					unalias(alias)
+				}
+			}()
 
 			// handle type parameters even if not allowed (Alias type is supported)
 			if tparam0 != nil {
-				if !versionErr && !buildcfg.Experiment.AliasTypeParams {
-					check.error(tdecl, UnsupportedFeature, "generic type alias requires GOEXPERIMENT=aliastypeparams")
-					versionErr = true
-				}
 				check.openScope(tdecl, "type parameters")
 				defer check.closeScope()
 				check.collectTypeParams(&alias.tparams, tdecl.TParamList)
@@ -534,8 +531,9 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *TypeN
 
 			rhs = check.definedType(tdecl.Type, obj)
 			assert(rhs != nil)
+
 			alias.fromRHS = rhs
-			Unalias(alias) // resolve alias.actual
+			unalias(alias) // resolve alias.actual
 		} else {
 			if !versionErr && tparam0 != nil {
 				check.error(tdecl, UnsupportedFeature, "generic type alias requires GODEBUG=gotypesalias=1 or unset")
@@ -858,7 +856,7 @@ func (check *Checker) declStmt(list []syntax.Decl) {
 
 			lhs0 := make([]*Var, len(s.NameList))
 			for i, name := range s.NameList {
-				lhs0[i] = NewVar(name.Pos(), pkg, name.Value, nil)
+				lhs0[i] = newVar(LocalVar, name.Pos(), pkg, name.Value, nil)
 			}
 
 			// initialize all variables

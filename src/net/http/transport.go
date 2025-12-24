@@ -11,6 +11,7 @@ package http
 
 import (
 	"bufio"
+	"compress/flate"
 	"compress/gzip"
 	"container/list"
 	"context"
@@ -20,6 +21,7 @@ import (
 	"internal/godebug"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http/httptrace"
 	"net/http/internal/ascii"
@@ -75,8 +77,7 @@ const DefaultMaxIdleConnsPerHost = 2
 // Transport uses HTTP/1.1 for HTTP URLs and either HTTP/1.1 or HTTP/2
 // for HTTPS URLs, depending on whether the server supports HTTP/2,
 // and how the Transport is configured. The [DefaultTransport] supports HTTP/2.
-// To explicitly enable HTTP/2 on a transport, use golang.org/x/net/http2
-// and call ConfigureTransport. See the package docs for more about HTTP/2.
+// To explicitly enable HTTP/2 on a transport, set [Transport.Protocols].
 //
 // Responses with status codes in the 1xx range are either handled
 // automatically (100 expect-continue) or ignored. The one
@@ -293,6 +294,22 @@ type Transport struct {
 	// To use a custom dialer or TLS config and still attempt HTTP/2
 	// upgrades, set this to true.
 	ForceAttemptHTTP2 bool
+
+	// HTTP2 configures HTTP/2 connections.
+	//
+	// This field does not yet have any effect.
+	// See https://go.dev/issue/67813.
+	HTTP2 *HTTP2Config
+
+	// Protocols is the set of protocols supported by the transport.
+	//
+	// If Protocols includes UnencryptedHTTP2 and does not include HTTP1,
+	// the transport will use unencrypted HTTP/2 for requests for http:// URLs.
+	//
+	// If Protocols is nil, the default is usually HTTP/1 only.
+	// If ForceAttemptHTTP2 is true, or if TLSNextProto contains an "h2" entry,
+	// the default is HTTP/1 and HTTP/2.
+	Protocols *Protocols
 }
 
 func (t *Transport) writeBufferSize() int {
@@ -307,6 +324,13 @@ func (t *Transport) readBufferSize() int {
 		return t.ReadBufferSize
 	}
 	return 4 << 10
+}
+
+func (t *Transport) maxHeaderResponseSize() int64 {
+	if t.MaxResponseHeaderBytes > 0 {
+		return t.MaxResponseHeaderBytes
+	}
+	return 10 << 20 // conservative default; same as http2
 }
 
 // Clone returns a deep copy of t's exported fields.
@@ -338,10 +362,18 @@ func (t *Transport) Clone() *Transport {
 	if t.TLSClientConfig != nil {
 		t2.TLSClientConfig = t.TLSClientConfig.Clone()
 	}
+	if t.HTTP2 != nil {
+		t2.HTTP2 = &HTTP2Config{}
+		*t2.HTTP2 = *t.HTTP2
+	}
+	if t.Protocols != nil {
+		t2.Protocols = &Protocols{}
+		*t2.Protocols = *t.Protocols
+	}
 	if !t.tlsNextProtoWasNil {
-		npm := map[string]func(authority string, c *tls.Conn) RoundTripper{}
-		for k, v := range t.TLSNextProto {
-			npm[k] = v
+		npm := maps.Clone(t.TLSNextProto)
+		if npm == nil {
+			npm = make(map[string]func(authority string, c *tls.Conn) RoundTripper)
 		}
 		t2.TLSNextProto = npm
 	}
@@ -388,18 +420,12 @@ func (t *Transport) onceSetNextProtoDefaults() {
 		}
 	}
 
-	if t.TLSNextProto != nil {
-		// This is the documented way to disable http2 on a
-		// Transport.
+	if _, ok := t.TLSNextProto["h2"]; ok {
+		// There's an existing HTTP/2 implementation installed.
 		return
 	}
-	if !t.ForceAttemptHTTP2 && (t.TLSClientConfig != nil || t.Dial != nil || t.DialContext != nil || t.hasCustomTLSDialer()) {
-		// Be conservative and don't automatically enable
-		// http2 if they've specified a custom TLS config or
-		// custom dialers. Let them opt-in themselves via
-		// http2.ConfigureTransport so we don't surprise them
-		// by modifying their tls.Config. Issue 14275.
-		// However, if ForceAttemptHTTP2 is true, it overrides the above checks.
+	protocols := t.protocols()
+	if !protocols.HTTP2() && !protocols.UnencryptedHTTP2() {
 		return
 	}
 	if omitBundledHTTP2 {
@@ -426,6 +452,40 @@ func (t *Transport) onceSetNextProtoDefaults() {
 			t2.MaxHeaderListSize = uint32(limit1)
 		}
 	}
+
+	// Server.ServeTLS clones the tls.Config before modifying it.
+	// Transport doesn't. We may want to make the two consistent some day.
+	//
+	// http2configureTransport will have already set NextProtos, but adjust it again
+	// here to remove HTTP/1.1 if the user has disabled it.
+	t.TLSClientConfig.NextProtos = adjustNextProtos(t.TLSClientConfig.NextProtos, protocols)
+}
+
+func (t *Transport) protocols() Protocols {
+	if t.Protocols != nil {
+		return *t.Protocols // user-configured set
+	}
+	var p Protocols
+	p.SetHTTP1(true) // default always includes HTTP/1
+	switch {
+	case t.TLSNextProto != nil:
+		// Setting TLSNextProto to an empty map is a documented way
+		// to disable HTTP/2 on a Transport.
+		if t.TLSNextProto["h2"] != nil {
+			p.SetHTTP2(true)
+		}
+	case !t.ForceAttemptHTTP2 && (t.TLSClientConfig != nil || t.Dial != nil || t.DialContext != nil || t.hasCustomTLSDialer()):
+		// Be conservative and don't automatically enable
+		// http2 if they've specified a custom TLS config or
+		// custom dialers. Let them opt-in themselves via
+		// Transport.Protocols.SetHTTP2(true) so we don't surprise them
+		// by modifying their tls.Config. Issue 14275.
+		// However, if ForceAttemptHTTP2 is true, it overrides the above checks.
+	case http2client.Value() == "0":
+	default:
+		p.SetHTTP2(true)
+	}
+	return p
 }
 
 // ProxyFromEnvironment returns the URL of the proxy to use for a
@@ -670,7 +730,7 @@ func (t *Transport) roundTrip(req *Request) (_ *Response, err error) {
 			if e, ok := err.(transportReadFromServerError); ok {
 				err = e.err
 			}
-			if b, ok := req.Body.(*readTrackingBody); ok && !b.didClose {
+			if b, ok := req.Body.(*readTrackingBody); ok && !b.didClose.Load() {
 				// Issue 49621: Close the request body if pconn.roundTrip
 				// didn't do so already. This can happen if the pconn
 				// write loop exits without reading the write request.
@@ -700,8 +760,8 @@ var errCannotRewind = errors.New("net/http: cannot rewind body after connection 
 
 type readTrackingBody struct {
 	io.ReadCloser
-	didRead  bool
-	didClose bool
+	didRead  bool // not atomic.Bool because only one goroutine (the user's) should be accessing
+	didClose atomic.Bool
 }
 
 func (r *readTrackingBody) Read(data []byte) (int, error) {
@@ -710,7 +770,9 @@ func (r *readTrackingBody) Read(data []byte) (int, error) {
 }
 
 func (r *readTrackingBody) Close() error {
-	r.didClose = true
+	if !r.didClose.CompareAndSwap(false, true) {
+		return nil
+	}
 	return r.ReadCloser.Close()
 }
 
@@ -732,10 +794,10 @@ func setupRewindBody(req *Request) *Request {
 // rewindBody takes care of closing req.Body when appropriate
 // (in all cases except when rewindBody returns req unmodified).
 func rewindBody(req *Request) (rewound *Request, err error) {
-	if req.Body == nil || req.Body == NoBody || (!req.Body.(*readTrackingBody).didRead && !req.Body.(*readTrackingBody).didClose) {
+	if req.Body == nil || req.Body == NoBody || (!req.Body.(*readTrackingBody).didRead && !req.Body.(*readTrackingBody).didClose.Load()) {
 		return req, nil // nothing to rewind
 	}
-	if !req.Body.(*readTrackingBody).didClose {
+	if !req.Body.(*readTrackingBody).didClose.Load() {
 		req.closeBody()
 	}
 	if req.GetBody == nil {
@@ -820,9 +882,9 @@ func (t *Transport) RegisterProtocol(scheme string, rt RoundTripper) {
 	if _, exists := oldMap[scheme]; exists {
 		panic("protocol " + scheme + " already registered")
 	}
-	newMap := make(map[string]RoundTripper)
-	for k, v := range oldMap {
-		newMap[k] = v
+	newMap := maps.Clone(oldMap)
+	if newMap == nil {
+		newMap = make(map[string]RoundTripper)
 	}
 	newMap[scheme] = rt
 	t.altProto.Store(newMap)
@@ -1306,7 +1368,7 @@ func (w *wantConn) tryDeliver(pc *persistConn, err error, idleAt time.Time) bool
 
 // cancel marks w as no longer wanting a result (for example, due to cancellation).
 // If a connection has been delivered already, cancel returns it with t.putOrCloseIdleConn.
-func (w *wantConn) cancel(t *Transport, err error) {
+func (w *wantConn) cancel(t *Transport) {
 	w.mu.Lock()
 	var pc *persistConn
 	if w.done {
@@ -1455,7 +1517,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persis
 	}
 	defer func() {
 		if err != nil {
-			w.cancel(t, err)
+			w.cancel(t)
 		}
 	}()
 
@@ -1817,7 +1879,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 			}
 			// Okay to use and discard buffered reader here, because
 			// TLS server will not speak until spoken to.
-			br := bufio.NewReader(conn)
+			br := bufio.NewReader(&io.LimitedReader{R: conn, N: t.maxHeaderResponseSize()})
 			resp, err = ReadResponse(br, connectReq)
 		}()
 		select {
@@ -1855,6 +1917,24 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		if err := pconn.addTLS(ctx, cm.tlsHost(), trace); err != nil {
 			return nil, err
 		}
+	}
+
+	// Possible unencrypted HTTP/2 with prior knowledge.
+	unencryptedHTTP2 := pconn.tlsState == nil &&
+		t.Protocols != nil &&
+		t.Protocols.UnencryptedHTTP2() &&
+		!t.Protocols.HTTP1()
+	if unencryptedHTTP2 {
+		next, ok := t.TLSNextProto[nextProtoUnencryptedHTTP2]
+		if !ok {
+			return nil, errors.New("http: Transport does not support unencrypted HTTP/2")
+		}
+		alt := next(cm.targetAddr, unencryptedTLSConn(pconn.conn))
+		if e, ok := alt.(erringRoundTripper); ok {
+			// pconn.conn was closed by next (http2configureTransports.upgradeFn).
+			return nil, e.RoundTripErr()
+		}
+		return &persistConn{t: t, cacheKey: pconn.cacheKey, alt: alt}, nil
 	}
 
 	if s := pconn.tlsState; s != nil && s.NegotiatedProtocolIsMutual && s.NegotiatedProtocol != "" {
@@ -2036,10 +2116,7 @@ type persistConn struct {
 }
 
 func (pc *persistConn) maxHeaderResponseSize() int64 {
-	if v := pc.t.MaxResponseHeaderBytes; v != 0 {
-		return v
-	}
-	return 10 << 20 // conservative default; same as http2
+	return pc.t.maxHeaderResponseSize()
 }
 
 func (pc *persistConn) Read(p []byte) (n int, err error) {
@@ -2387,8 +2464,6 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 			trace.GotFirstResponseByte()
 		}
 	}
-	num1xx := 0               // number of informational 1xx headers received
-	const max1xxResponses = 5 // arbitrary bound on number of informational responses
 
 	continueCh := rc.continueCh
 	for {
@@ -2408,15 +2483,18 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		// treat 101 as a terminal status, see issue 26161
 		is1xxNonTerminal := is1xx && resCode != StatusSwitchingProtocols
 		if is1xxNonTerminal {
-			num1xx++
-			if num1xx > max1xxResponses {
-				return nil, errors.New("net/http: too many 1xx informational responses")
-			}
-			pc.readLimit = pc.maxHeaderResponseSize() // reset the limit
 			if trace != nil && trace.Got1xxResponse != nil {
 				if err := trace.Got1xxResponse(resCode, textproto.MIMEHeader(resp.Header)); err != nil {
 					return nil, err
 				}
+				// If the 1xx response was delivered to the user,
+				// then they're responsible for limiting the number of
+				// responses. Reset the header limit.
+				//
+				// If the user didn't examine the 1xx response, then we
+				// limit the size of all headers (including both 1xx
+				// and the final response) to maxHeaderResponseSize.
+				pc.readLimit = pc.maxHeaderResponseSize() // reset the limit
 			}
 			continue
 		}
@@ -2502,6 +2580,13 @@ func (b *readWriteCloserBody) Read(p []byte) (n int, err error) {
 		return n, err
 	}
 	return b.ReadWriteCloser.Read(p)
+}
+
+func (b *readWriteCloserBody) CloseWrite() error {
+	if cw, ok := b.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return fmt.Errorf("CloseWrite: %w", ErrNotSupported)
 }
 
 // nothingWrittenError wraps a write errors which ended up writing zero bytes.
@@ -2853,11 +2938,17 @@ func (pc *persistConn) closeLocked(err error) {
 	pc.mutateHeaderFunc = nil
 }
 
-var portMap = map[string]string{
-	"http":    "80",
-	"https":   "443",
-	"socks5":  "1080",
-	"socks5h": "1080",
+func schemePort(scheme string) string {
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "socks5", "socks5h":
+		return "1080"
+	default:
+		return ""
+	}
 }
 
 func idnaASCIIFromURL(url *url.URL) string {
@@ -2872,7 +2963,7 @@ func idnaASCIIFromURL(url *url.URL) string {
 func canonicalAddr(url *url.URL) string {
 	port := url.Port()
 	if port == "" {
-		port = portMap[url.Scheme]
+		port = schemePort(url.Scheme)
 	}
 	return net.JoinHostPort(idnaASCIIFromURL(url), port)
 }
@@ -2898,6 +2989,7 @@ type bodyEOFSignal struct {
 }
 
 var errReadOnClosedResBody = errors.New("http: read on closed response body")
+var errConcurrentReadOnResBody = errors.New("http: concurrent read on response body")
 
 func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
 	es.mu.Lock()
@@ -2947,37 +3039,98 @@ func (es *bodyEOFSignal) condfn(err error) error {
 }
 
 // gzipReader wraps a response body so it can lazily
-// call gzip.NewReader on the first call to Read
+// get gzip.Reader from the pool on the first call to Read.
+// After Close is called it puts gzip.Reader to the pool immediately
+// if there is no Read in progress or later when Read completes.
 type gzipReader struct {
 	_    incomparable
 	body *bodyEOFSignal // underlying HTTP/1 response body framing
-	zr   *gzip.Reader   // lazily-initialized gzip reader
-	zerr error          // any error from gzip.NewReader; sticky
+	mu   sync.Mutex     // guards zr and zerr
+	zr   *gzip.Reader
+	zerr error
+}
+
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+func (eofReader) ReadByte() (byte, error)  { return 0, io.EOF }
+
+var gzipPool = sync.Pool{New: func() any { return new(gzip.Reader) }}
+
+// gzipPoolGet gets a gzip.Reader from the pool and resets it to read from r.
+func gzipPoolGet(r io.Reader) (*gzip.Reader, error) {
+	zr := gzipPool.Get().(*gzip.Reader)
+	if err := zr.Reset(r); err != nil {
+		gzipPoolPut(zr)
+		return nil, err
+	}
+	return zr, nil
+}
+
+// gzipPoolPut puts a gzip.Reader back into the pool.
+func gzipPoolPut(zr *gzip.Reader) {
+	// Reset will allocate bufio.Reader if we pass it anything
+	// other than a flate.Reader, so ensure that it's getting one.
+	var r flate.Reader = eofReader{}
+	zr.Reset(r)
+	gzipPool.Put(zr)
+}
+
+// acquire returns a gzip.Reader for reading response body.
+// The reader must be released after use.
+func (gz *gzipReader) acquire() (*gzip.Reader, error) {
+	gz.mu.Lock()
+	defer gz.mu.Unlock()
+	if gz.zerr != nil {
+		return nil, gz.zerr
+	}
+	if gz.zr == nil {
+		gz.zr, gz.zerr = gzipPoolGet(gz.body)
+		if gz.zerr != nil {
+			return nil, gz.zerr
+		}
+	}
+	ret := gz.zr
+	gz.zr, gz.zerr = nil, errConcurrentReadOnResBody
+	return ret, nil
+}
+
+// release returns the gzip.Reader to the pool if Close was called during Read.
+func (gz *gzipReader) release(zr *gzip.Reader) {
+	gz.mu.Lock()
+	defer gz.mu.Unlock()
+	if gz.zerr == errConcurrentReadOnResBody {
+		gz.zr, gz.zerr = zr, nil
+	} else { // errReadOnClosedResBody
+		gzipPoolPut(zr)
+	}
+}
+
+// close returns the gzip.Reader to the pool immediately or
+// signals release to do so after Read completes.
+func (gz *gzipReader) close() {
+	gz.mu.Lock()
+	defer gz.mu.Unlock()
+	if gz.zerr == nil && gz.zr != nil {
+		gzipPoolPut(gz.zr)
+		gz.zr = nil
+	}
+	gz.zerr = errReadOnClosedResBody
 }
 
 func (gz *gzipReader) Read(p []byte) (n int, err error) {
-	if gz.zr == nil {
-		if gz.zerr == nil {
-			gz.zr, gz.zerr = gzip.NewReader(gz.body)
-		}
-		if gz.zerr != nil {
-			return 0, gz.zerr
-		}
-	}
-
-	gz.body.mu.Lock()
-	if gz.body.closed {
-		err = errReadOnClosedResBody
-	}
-	gz.body.mu.Unlock()
-
+	zr, err := gz.acquire()
 	if err != nil {
 		return 0, err
 	}
-	return gz.zr.Read(p)
+	defer gz.release(zr)
+
+	return zr.Read(p)
 }
 
 func (gz *gzipReader) Close() error {
+	gz.close()
+
 	return gz.body.Close()
 }
 

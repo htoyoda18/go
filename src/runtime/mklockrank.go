@@ -41,7 +41,7 @@ const ranks = `
 # Sysmon
 NONE
 < sysmon
-< scavenge, forcegc;
+< scavenge, forcegc, computeMaxProcs, updateMaxProcsG;
 
 # Defer
 NONE < defer;
@@ -50,10 +50,15 @@ NONE < defer;
 NONE <
   sweepWaiters,
   assistQueue,
+  strongFromWeakQueue,
+  cleanupQueue,
   sweep;
 
 # Test only
 NONE < testR, testW;
+
+# vgetrandom
+NONE < vgetrandom;
 
 NONE < timerSend;
 
@@ -61,11 +66,15 @@ NONE < timerSend;
 NONE < allocmW, execW, cpuprof, pollCache, pollDesc, wakeableSleep;
 scavenge, sweep, testR, wakeableSleep, timerSend < hchan;
 assistQueue,
+  cleanupQueue,
+  computeMaxProcs,
   cpuprof,
   forcegc,
+  updateMaxProcsG,
   hchan,
   pollDesc, # pollDesc can interact with timers, which can lock sched.
   scavenge,
+  strongFromWeakQueue,
   sweep,
   sweepWaiters,
   testR,
@@ -93,6 +102,17 @@ NONE
 < itab
 < reflectOffs;
 
+# Synctest
+hchan,
+  notifyList,
+  reflectOffs,
+  root,
+  strongFromWeakQueue,
+  sweepWaiters,
+  timer,
+  timers
+< synctest;
+
 # User arena state
 NONE < userArenaState;
 
@@ -118,7 +138,8 @@ allg,
   reflectOffs,
   timer,
   traceStrings,
-  userArenaState
+  userArenaState,
+  vgetrandom
 # Above MALLOC are things that can allocate memory.
 < MALLOC
 # Below MALLOC is the malloc implementation.
@@ -143,6 +164,7 @@ gcBitsArenas,
   profInsert,
   profMemFuture,
   spanSetSpine,
+  synctest,
   fin,
   root
 # Anything that can grow the stack can acquire STACKGROW.
@@ -171,6 +193,9 @@ defer,
 # Below WB is the write barrier implementation.
 < wbufSpans;
 
+# xRegState allocator
+sched < xRegAlloc;
+
 # Span allocator
 stackLarge,
   stackpool,
@@ -183,7 +208,8 @@ stackLarge,
 # an mspanSpecial lock, and they're part of the malloc implementation.
 # Pinner bits might be freed by the span allocator.
 mheap, mspanSpecial < mheapSpecial;
-mheap, mheapSpecial < globalAlloc;
+# Fixallocs
+mheap, mheapSpecial, xRegAlloc < globalAlloc;
 
 # Execution tracer events (with a P)
 hchan,

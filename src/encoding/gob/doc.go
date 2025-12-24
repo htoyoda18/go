@@ -193,14 +193,13 @@ pair (-type id, encoded-type) where encoded-type is the gob encoding of a wireTy
 description, constructed from these types:
 
 	type wireType struct {
-		ArrayT           *ArrayType
-		SliceT           *SliceType
-		StructT          *StructType
-		MapT             *MapType
+		ArrayT           *arrayType
+		SliceT           *sliceType
+		StructT          *structType
+		MapT             *mapType
 		GobEncoderT      *gobEncoderType
 		BinaryMarshalerT *gobEncoderType
 		TextMarshalerT   *gobEncoderType
-
 	}
 	type arrayType struct {
 		CommonType
@@ -217,7 +216,7 @@ description, constructed from these types:
 	}
 	type structType struct {
 		CommonType
-		Field []*fieldType // the fields of the struct.
+		Field []fieldType // the fields of the struct.
 	}
 	type fieldType struct {
 		Name string // the name of the field.
@@ -275,7 +274,7 @@ released version, subject to issues such as security fixes. See the Go compatibi
 document for background: https://golang.org/doc/go1compat
 
 See "Gobs of data" for a design discussion of the gob wire format:
-https://blog.golang.org/gobs-of-data
+https://go.dev/blog/gob
 
 # Security
 

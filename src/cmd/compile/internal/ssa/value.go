@@ -144,6 +144,13 @@ func (v *Value) AuxArm64BitField() arm64BitField {
 	return arm64BitField(v.AuxInt)
 }
 
+func (v *Value) AuxArm64ConditionalParams() arm64ConditionalParams {
+	if opcodeTable[v.Op].auxType != auxARM64ConditionalParams {
+		v.Fatalf("op %s doesn't have a ARM64ConditionalParams aux field", v.Op)
+	}
+	return auxIntToArm64ConditionalParams(v.AuxInt)
+}
+
 // long form print.  v# = opcode <type> [aux] args [: reg] (names)
 func (v *Value) LongString() string {
 	if v == nil {
@@ -200,9 +207,18 @@ func (v *Value) auxString() string {
 	case auxUInt8:
 		return fmt.Sprintf(" [%d]", v.AuxUInt8())
 	case auxARM64BitField:
-		lsb := v.AuxArm64BitField().getARM64BFlsb()
-		width := v.AuxArm64BitField().getARM64BFwidth()
+		lsb := v.AuxArm64BitField().lsb()
+		width := v.AuxArm64BitField().width()
 		return fmt.Sprintf(" [lsb=%d,width=%d]", lsb, width)
+	case auxARM64ConditionalParams:
+		params := v.AuxArm64ConditionalParams()
+		cond := params.Cond()
+		nzcv := params.Nzcv()
+		imm, ok := params.ConstValue()
+		if ok {
+			return fmt.Sprintf(" [cond=%s,nzcv=%d,imm=%d]", cond, nzcv, imm)
+		}
+		return fmt.Sprintf(" [cond=%s,nzcv=%d]", cond, nzcv)
 	case auxFloat32, auxFloat64:
 		return fmt.Sprintf(" [%g]", v.AuxFloat())
 	case auxString:
@@ -332,6 +348,13 @@ func (v *Value) SetArgs3(a, b, c *Value) {
 	v.AddArg(a)
 	v.AddArg(b)
 	v.AddArg(c)
+}
+func (v *Value) SetArgs4(a, b, c, d *Value) {
+	v.resetArgs()
+	v.AddArg(a)
+	v.AddArg(b)
+	v.AddArg(c)
+	v.AddArg(d)
 }
 
 func (v *Value) resetArgs() {

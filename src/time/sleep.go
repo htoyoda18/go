@@ -142,7 +142,7 @@ func (t *Timer) Stop() bool {
 // in Go 1.27 or later.
 func NewTimer(d Duration) *Timer {
 	c := make(chan Time, 1)
-	t := (*Timer)(newTimer(when(d), 0, sendTime, c, syncTimer(c)))
+	t := newTimer(when(d), 0, sendTime, c, syncTimer(c))
 	t.C = c
 	return t
 }
@@ -165,8 +165,8 @@ func NewTimer(d Duration) *Timer {
 // to receive a time value corresponding to the previous timer settings;
 // if the program has not received from t.C already and the timer is
 // running, Reset is guaranteed to return true.
-// Before Go 1.23, the only safe way to use Reset was to [Stop] and
-// explicitly drain the timer first.
+// Before Go 1.23, the only safe way to use Reset was to call [Timer.Stop]
+// and explicitly drain the timer first.
 // See the [NewTimer] documentation for more details.
 func (t *Timer) Reset(d Duration) bool {
 	if !t.initTimer {
@@ -180,7 +180,7 @@ func (t *Timer) Reset(d Duration) bool {
 func sendTime(c any, seq uintptr, delta int64) {
 	// delta is how long ago the channel send was supposed to happen.
 	// The current time can be arbitrarily far into the future, because the runtime
-	// can delay a sendTime call until a goroutines tries to receive from
+	// can delay a sendTime call until a goroutine tries to receive from
 	// the channel. Subtract delta to go back to the old time that we
 	// used to send.
 	select {
@@ -208,7 +208,7 @@ func After(d Duration) <-chan Time {
 // be used to cancel the call using its Stop method.
 // The returned Timer's C field is not used and will be nil.
 func AfterFunc(d Duration, f func()) *Timer {
-	return (*Timer)(newTimer(when(d), 0, goFunc, f, nil))
+	return newTimer(when(d), 0, goFunc, f, nil)
 }
 
 func goFunc(arg any, seq uintptr, delta int64) {

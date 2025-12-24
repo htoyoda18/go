@@ -95,6 +95,17 @@ import (
 // in its "lineage".
 
 // A Named represents a named (defined) type.
+//
+// A declaration such as:
+//
+//	type S struct { ... }
+//
+// creates a defined type whose underlying type is a struct,
+// and binds this type to the object S, a [TypeName].
+// Use [Named.Underlying] to access the underlying type.
+// Use [Named.Obj] to obtain the object S.
+//
+// Before type aliases (Go 1.9), the spec called defined types "named types".
 type Named struct {
 	check *Checker  // non-nil during type-checking; nil otherwise
 	obj   *TypeName // corresponding declared object for declared types; see above for instantiated types
@@ -119,8 +130,8 @@ type Named struct {
 	// accessed.
 	methods []*Func
 
-	// loader may be provided to lazily load type parameters, underlying type, and methods.
-	loader func(*Named) (tparams []*TypeParam, underlying Type, methods []*Func)
+	// loader may be provided to lazily load type parameters, underlying type, methods, and delayed functions
+	loader func(*Named) ([]*TypeParam, Type, []*Func, []func())
 }
 
 // instance holds information that is only necessary for instantiated named
@@ -135,9 +146,11 @@ type instance struct {
 // namedState represents the possible states that a named type may assume.
 type namedState uint32
 
+// Note: the order of states is relevant
 const (
 	unresolved namedState = iota // tparams, underlying type and methods might be unavailable
-	resolved                     // resolve has run; methods might be incomplete (for instances)
+	resolved                     // resolve has run; methods might be unexpanded (for instances)
+	loaded                       // loader has run; constraints might be unexpanded (for generic types)
 	complete                     // all data is known
 )
 
@@ -152,14 +165,27 @@ func NewNamed(obj *TypeName, underlying Type, methods []*Func) *Named {
 }
 
 // resolve resolves the type parameters, methods, and underlying type of n.
-// This information may be loaded from a provided loader function, or computed
-// from an origin type (in the case of instances).
 //
-// After resolution, the type parameters, methods, and underlying type of n are
-// accessible; but if n is an instantiated type, its methods may still be
-// unexpanded.
+// For the purposes of resolution, there are three categories of named types:
+//  1. Instantiated Types
+//  2. Lazy Loaded Types
+//  3. All Others
+//
+// Note that the above form a partition.
+//
+// Instantiated types:
+// Type parameters, methods, and underlying type of n become accessible,
+// though methods are lazily populated as needed.
+//
+// Lazy loaded types:
+// Type parameters, methods, and underlying type of n become accessible
+// and are fully expanded.
+//
+// All others:
+// Effectively, nothing happens. The underlying type of n may still be
+// a named type.
 func (n *Named) resolve() *Named {
-	if n.state() >= resolved { // avoid locking below
+	if n.state() > unresolved { // avoid locking below
 		return n
 	}
 
@@ -168,7 +194,7 @@ func (n *Named) resolve() *Named {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.state() >= resolved {
+	if n.state() > unresolved {
 		return n
 	}
 
@@ -204,13 +230,20 @@ func (n *Named) resolve() *Named {
 		assert(n.underlying == nil)
 		assert(n.TypeArgs().Len() == 0) // instances are created by instantiation, in which case n.loader is nil
 
-		tparams, underlying, methods := n.loader(n)
+		tparams, underlying, methods, delayed := n.loader(n)
+		n.loader = nil
 
 		n.tparams = bindTParams(tparams)
 		n.underlying = underlying
 		n.fromRHS = underlying // for cycle detection
 		n.methods = methods
-		n.loader = nil
+
+		// advance state to avoid deadlock calling delayed functions
+		n.setState(loaded)
+
+		for _, f := range delayed {
+			f()
+		}
 	}
 
 	n.setState(complete)
@@ -285,7 +318,7 @@ func (t *Named) cleanup() {
 		if t.TypeArgs().Len() == 0 {
 			panic("nil underlying")
 		}
-	case *Named:
+	case *Named, *Alias:
 		t.under() // t.under may add entries to check.cleaners
 	}
 	t.check = nil
@@ -433,8 +466,8 @@ func (t *Named) expandMethod(i int) *Func {
 		rtyp = t
 	}
 
-	sig.recv = substVar(origSig.recv, rtyp)
-	return substFunc(origm, sig)
+	sig.recv = cloneVar(origSig.recv, rtyp)
+	return cloneFunc(origm, sig)
 }
 
 // SetUnderlying sets the underlying type and marks t as complete.
